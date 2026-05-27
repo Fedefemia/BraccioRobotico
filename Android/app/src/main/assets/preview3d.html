@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #1E1E1E; }
+        canvas { width: 100%; height: 100%; display: block; }
+    </style>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/STLLoader.js"></script>
+</head>
+<body>
+<script>
+    // Configurazione Geometrica (Modifica questi valori per calibrare i pezzi a video)
+    const ROBOT_CONFIG = {
+        j0: { // Base Fissa
+            jointPos:          { x: 0, y: 0, z: 0 },
+            meshOffset:        { x: 0, y: 0, z: 0 },
+            meshRotation:      { x: 0, y: 0, z: 0 }
+        },
+        j1: { // Link 1 (Servo 0)
+            jointPos:          { x: 0, y: 0, z: 0 },
+            meshOffset:        { x: 0, y: 100, z: -10 },
+            meshRotation:      { x: 270, y: 0, z: 0 },
+            rotationAxis:      'y',
+            rotationDirection: 1
+        },
+        j2: { // Link 2 (Servo 1)
+            jointPos:          { x: 0, y: 40, z: 0 },
+            meshOffset:        { x: 0, y: 0, z: 0 },
+            meshRotation:      { x: 0, y: 0, z: 0 },
+            rotationAxis:      'y',
+            rotationDirection: 1
+        },
+        j3: { // Link 3 (Servo 2)
+            jointPos:          { x: 0, y: 40, z: 0 },
+            meshOffset:        { x: 0, y: 0, z: 0 },
+            meshRotation:      { x: 0, y: 0, z: 0 },
+            rotationAxis:      'x',
+            rotationDirection: 1
+        },
+        claw: { // Artiglio Claw (Servo 3)
+            jointPos:          { x: 0, y: 20, z: 0 },
+            meshOffset:        { x: 0, y: 0, z: 0 },
+            meshRotation:      { x: 0, y: 0, z: 0 },
+            rotationAxis:      'scale',
+            rotationDirection: 1
+        }
+    };
+
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x1E1E1E);
+
+    const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 1, 1000);
+    camera.position.set(150, 150, 250);
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.shadowMap.enabled = true;
+    document.body.appendChild(renderer.domElement);
+
+    const ambientLight = new THREE.AmbientLight(0x666666);
+    scene.add(ambientLight);
+    const dirLight1 = new THREE.DirectionalLight(0xFFFFFF, 0.8);
+    dirLight1.position.set(200, 400, 200);
+    scene.add(dirLight1);
+
+    const gridHelper = new THREE.GridHelper(200, 20, 0x444444, 0x222222);
+    gridHelper.position.y = -50;
+    scene.add(gridHelper);
+
+    // Gerarchia Nodi
+    const j0Group = new THREE.Group();
+    const j1Group = new THREE.Group();
+    const j2Group = new THREE.Group();
+    const j3Group = new THREE.Group();
+    const clawGroup = new THREE.Group();
+
+    j0Group.position.set(ROBOT_CONFIG.j0.jointPos.x, ROBOT_CONFIG.j0.jointPos.y, ROBOT_CONFIG.j0.jointPos.z);
+    j1Group.position.set(ROBOT_CONFIG.j1.jointPos.x, ROBOT_CONFIG.j1.jointPos.y, ROBOT_CONFIG.j1.jointPos.z);
+    j2Group.position.set(ROBOT_CONFIG.j2.jointPos.x, ROBOT_CONFIG.j2.jointPos.y, ROBOT_CONFIG.j2.jointPos.z);
+    j3Group.position.set(ROBOT_CONFIG.j3.jointPos.x, ROBOT_CONFIG.j3.jointPos.y, ROBOT_CONFIG.j3.jointPos.z);
+    clawGroup.position.set(ROBOT_CONFIG.claw.jointPos.x, ROBOT_CONFIG.claw.jointPos.y, ROBOT_CONFIG.claw.jointPos.z);
+
+    scene.add(j0Group);
+    j0Group.add(j1Group);
+    j1Group.add(j2Group);
+    j2Group.add(j3Group);
+    j3Group.add(clawGroup);
+
+    const activeGroups = [j1Group, j2Group, j3Group, clawGroup];
+    const configKeys = ['j1', 'j2', 'j3', 'claw'];
+
+    const loader = new THREE.STLLoader();
+    const defaultMaterial = new THREE.MeshPhongMaterial({ color: 0x00E5FF, specular: 0x111111, shininess: 100 });
+    const clawMaterial = new THREE.MeshPhongMaterial({ color: 0xFF9800, specular: 0x111111, shininess: 100 });
+    const materials = [defaultMaterial, defaultMaterial, defaultMaterial, clawMaterial];
+
+    // Caricamento Base Fissa
+    loader.load('base.stl', function (geometry) {
+        geometry.center();
+        const mesh = new THREE.Mesh(geometry, defaultMaterial);
+        mesh.position.set(ROBOT_CONFIG.j0.meshOffset.x, ROBOT_CONFIG.j0.meshOffset.y, ROBOT_CONFIG.j0.meshOffset.z);
+        j0Group.add(mesh);
+    });
+
+    function loadSTLPart(fileName, index) {
+        loader.load(fileName, function (geometry) {
+            geometry.center();
+            const mesh = new THREE.Mesh(geometry, materials[index]);
+            mesh.name = "mesh_" + index;
+
+            const cfg = ROBOT_CONFIG[configKeys[index]];
+            mesh.position.set(cfg.meshOffset.x, cfg.meshOffset.y, cfg.meshOffset.z);
+            mesh.rotation.set(
+                cfg.meshRotation.x * (Math.PI / 180),
+                cfg.meshRotation.y * (Math.PI / 180),
+                cfg.meshRotation.z * (Math.PI / 180)
+            );
+
+            activeGroups[index].add(mesh);
+        }, undefined, function (error) {
+            console.error("Errore STLLoader: " + fileName, error);
+        });
+    }
+
+    loadSTLPart('link1.stl', 0);
+    loadSTLPart('link2.stl', 1);
+    loadSTLPart('link3.stl', 2);
+    loadSTLPart('claw.stl', 3);
+
+    camera.lookAt(0, 20, 0);
+
+    function animate() {
+        requestAnimationFrame(animate);
+        renderer.render(scene, camera);
+    }
+    animate();
+
+    function updateJointAngle(jointIndex, angleDegree) {
+        if (jointIndex >= 0 && jointIndex < activeGroups.length) {
+            const cfg = ROBOT_CONFIG[configKeys[jointIndex]];
+            const targetRad = (angleDegree * (Math.PI / 180)) * cfg.rotationDirection;
+            const targetGroup = activeGroups[jointIndex];
+
+            if (cfg.rotationAxis === 'scale') {
+                targetGroup.scale.set(1 + (angleDegree / 270) * cfg.rotationDirection, 1, 1);
+            } else {
+                targetGroup.rotation.x = 0;
+                targetGroup.rotation.y = 0;
+                targetGroup.rotation.z = 0;
+
+                if (cfg.rotationAxis === 'x') targetGroup.rotation.x = targetRad;
+                if (cfg.rotationAxis === 'y') targetGroup.rotation.y = targetRad;
+                if (cfg.rotationAxis === 'z') targetGroup.rotation.z = targetRad;
+            }
+        }
+    }
+
+    function reloadSTL(jointIndex, newFileName) {
+        if (jointIndex >= 0 && jointIndex < activeGroups.length) {
+            const targetGroup = activeGroups[jointIndex];
+            const oldMesh = targetGroup.getObjectByName("mesh_" + jointIndex);
+            if (oldMesh) {
+                targetGroup.remove(oldMesh);
+                oldMesh.geometry.dispose();
+            }
+            loadSTLPart(newFileName, jointIndex);
+        }
+    }
+
+    window.addEventListener('resize', onWindowResize, false);
+    function onWindowResize() {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+    }
+</script>
+</body>
+</html>
