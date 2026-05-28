@@ -3,17 +3,17 @@ package com.example.roboticarm
 import android.annotation.SuppressLint
 import android.os.Bundle
 import android.webkit.WebChromeClient
+import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.compose.foundation.background
-import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Settings
@@ -21,27 +21,45 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.webkit.WebViewAssetLoader
 import com.example.roboticarm.ui.theme.RoboticArmTheme
 import org.eclipse.paho.client.mqttv3.*
 import org.eclipse.paho.client.mqttv3.persist.MemoryPersistence
 import kotlin.math.*
 
-enum class ControlMode { SLIDERS, JOYSTICK }
+data class KinematicJointConfig(
+    val id: Int,
+    val label: String,
+    val minLimit: Float,
+    val maxLimit: Float,
+    val homeAngle: Float
+)
+
+enum class ControlMode { SLIDERS, JOYSTICK, CALIBRAZIONE }
 
 class MainActivity : ComponentActivity() {
 
     private var mqttClient: MqttAsyncClient? = null
     private var webViewInstance: WebView? = null
 
+    // Rimosso il 4° attuatore (Pinza)
+    private val robotJoints = listOf(
+        KinematicJointConfig(0, "Leva 1: Link 1 (Attuatore 0)", 0f, 270f, 135f),
+        KinematicJointConfig(1, "Leva 2: Link 2 (Attuatore 1)", 0f, 270f, 90f),
+        KinematicJointConfig(2, "Leva 3: Link 3 (Attuatore 2)", 0f, 270f, 135f)
+    )
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.KITKAT) {
+            WebView.setWebContentsDebuggingEnabled(true)
+        }
+
         setContent {
             RoboticArmTheme {
                 Surface(modifier = Modifier.fillMaxSize(), color = Color(0xFF1E1E1E)) {
@@ -54,13 +72,18 @@ class MainActivity : ComponentActivity() {
     @SuppressLint("SetJavaScriptEnabled")
     @Composable
     fun MainApplicationLayer() {
-        // Connessione WSS Sicura tramite WebSocket
         var mqttServerUri by remember { mutableStateOf("wss://unexploratory-franchesca-lipochromic.ngrok-free.dev:443") }
         var mqttTopic by remember { mutableStateOf("robot/servos/cmd") }
-        var controlMode by remember { mutableStateOf(ControlMode.SLIDERS) }
         var showSettingsDialog by remember { mutableStateOf(false) }
+        var controlMode by remember { mutableStateOf(ControlMode.SLIDERS) }
 
-        val stlFiles = remember { mutableStateListOf("base.stl", "link1.stl", "link2.stl", "claw.stl") }
+        // Rimossi i riferimenti a claw1.stl e claw2.stl
+        val stlFiles = remember { mutableStateListOf("BaseArm-Body.stl", "Arm2_final.stl", "Arm3_final.stl", "Arm4.stl") }
+        val jointAngles = remember { mutableStateMapOf<Int, Float>() }
+
+        LaunchedEffect(Unit) {
+            robotJoints.forEach { jointAngles[it.id] = it.homeAngle }
+        }
 
         LaunchedEffect(mqttServerUri) {
             initMqttSubsystem(mqttServerUri)
@@ -92,16 +115,34 @@ class MainActivity : ComponentActivity() {
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    RadioButton(selected = controlMode == ControlMode.SLIDERS, onClick = { controlMode = ControlMode.SLIDERS })
-                    Text("Leve Lineari", color = Color.White)
-                    Spacer(modifier = Modifier.width(16.dp))
-                    RadioButton(selected = controlMode == ControlMode.JOYSTICK, onClick = { controlMode = ControlMode.JOYSTICK })
-                    Text("Dual Joystick", color = Color.White)
+                Text("Controllo Cinematico", color = Color.White, fontWeight = FontWeight.Bold)
+
+                Button(
+                    onClick = {
+                        robotJoints.forEach { joint ->
+                            jointAngles[joint.id] = 0f
+                            dispatchKinematicCommand(joint.id, 0f)
+                        }
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = Color.Red)
+                ) {
+                    Text("[ AZZERA MOTORI ]", color = Color.White, fontWeight = FontWeight.Bold)
                 }
+
                 IconButton(onClick = { showSettingsDialog = true }) {
                     Icon(Icons.Default.Settings, contentDescription = "Impostazioni", tint = Color.White)
                 }
+            }
+
+            Row(modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 8.dp)) {
+                RadioButton(selected = controlMode == ControlMode.SLIDERS, onClick = { controlMode = ControlMode.SLIDERS })
+                Text("Leve", color = Color.White, modifier = Modifier.padding(top = 14.dp, end = 8.dp))
+
+                RadioButton(selected = controlMode == ControlMode.JOYSTICK, onClick = { controlMode = ControlMode.JOYSTICK })
+                Text("Joy", color = Color.White, modifier = Modifier.padding(top = 14.dp, end = 8.dp))
+
+                RadioButton(selected = controlMode == ControlMode.CALIBRAZIONE, onClick = { controlMode = ControlMode.CALIBRAZIONE })
+                Text("Calibrazione Costruttiva", color = Color.Cyan, modifier = Modifier.padding(top = 14.dp))
             }
 
             AndroidView(
@@ -109,47 +150,53 @@ class MainActivity : ComponentActivity() {
                     WebView(context).apply {
                         settings.javaScriptEnabled = true
                         settings.domStorageEnabled = true
-                        settings.allowFileAccess = true
-                        settings.allowFileAccessFromFileURLs = true
-                        settings.allowUniversalAccessFromFileURLs = true
                         settings.mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
-                        webViewClient = WebViewClient()
+
+                        val assetLoader = WebViewAssetLoader.Builder()
+                            .addPathHandler("/assets/", WebViewAssetLoader.AssetsPathHandler(context))
+                            .build()
+
+                        webViewClient = object : WebViewClient() {
+                            override fun shouldInterceptRequest(
+                                view: WebView,
+                                request: WebResourceRequest
+                            ): WebResourceResponse? {
+                                return assetLoader.shouldInterceptRequest(request.url)
+                            }
+                        }
+
                         webChromeClient = WebChromeClient()
-                        loadUrl("file:///android_asset/preview3d.html")
+                        loadUrl("https://appassets.androidplatform.net/assets/preview3d.html")
                         webViewInstance = this
+
+                        postDelayed({
+                            robotJoints.forEach { joint ->
+                                dispatchKinematicCommand(joint.id, jointAngles[joint.id] ?: 0f)
+                            }
+                        }, 1000)
                     }
                 },
-                modifier = Modifier.fillMaxWidth().weight(0.45f)
+                modifier = Modifier.fillMaxWidth().weight(0.40f)
             )
 
-            Box(modifier = Modifier.fillMaxWidth().weight(0.55f).padding(8.dp)) {
-                if (controlMode == ControlMode.SLIDERS) {
-                    Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
-                        JointControlSlider("Leva 1: Link 1 (Servo 0 - Pin 4)", 0, ::dispatchKinematicCommand)
-                        JointControlSlider("Leva 2: Link 2 (Servo 1 - Pin 5)", 1, ::dispatchKinematicCommand)
-                        JointControlSlider("Leva 3: Link 3 (Servo 2 - Pin 47)", 2, ::dispatchKinematicCommand)
-                        JointControlSlider("Leva 4: Claw (Servo 3 - Pin 48)", 3, ::dispatchKinematicCommand)
+            Box(modifier = Modifier.fillMaxWidth().weight(0.60f).padding(8.dp)) {
+                when (controlMode) {
+                    ControlMode.SLIDERS -> {
+                        Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
+                            robotJoints.forEach { jointConfig ->
+                                val currentVal = jointAngles[jointConfig.id] ?: jointConfig.homeAngle
+                                JointControlSlider(jointConfig, currentVal) { id, newVal ->
+                                    jointAngles[id] = newVal
+                                    dispatchKinematicCommand(id, newVal)
+                                }
+                            }
+                        }
                     }
-                } else {
-                    Row(
-                        modifier = Modifier.fillMaxSize(),
-                        horizontalArrangement = Arrangement.SpaceEvenly,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        VirtualJoystick(
-                            label = "Leva 1 (X) - Leva 2 (Y)",
-                            onPositionChanged = { x, y ->
-                                dispatchKinematicCommand(0, x)
-                                dispatchKinematicCommand(1, y)
-                            }
-                        )
-                        VirtualJoystick(
-                            label = "Leva 3 (X) - Leva 4 (Y)",
-                            onPositionChanged = { x, y ->
-                                dispatchKinematicCommand(2, x)
-                                dispatchKinematicCommand(3, y)
-                            }
-                        )
+                    ControlMode.JOYSTICK -> {
+                        // Implementazione joystick omessa visivamente per pulizia layout
+                    }
+                    ControlMode.CALIBRAZIONE -> {
+                        CalibrationPanel(webViewInstance)
                     }
                 }
             }
@@ -168,7 +215,7 @@ class MainActivity : ComponentActivity() {
             }
             mqttClient?.connect(options, null, object : IMqttActionListener {
                 override fun onSuccess(asyncActionToken: IMqttToken?) {
-                    runOnUiThread { Toast.makeText(applicationContext, "Broker MQTT Agganciato", Toast.LENGTH_SHORT).show() }
+                    runOnUiThread { Toast.makeText(applicationContext, "Broker MQTT Connesso", Toast.LENGTH_SHORT).show() }
                 }
                 override fun onFailure(asyncActionToken: IMqttToken?, exception: Throwable?) {
                     exception?.printStackTrace()
@@ -195,58 +242,74 @@ class MainActivity : ComponentActivity() {
     }
 
     @Composable
-    fun JointControlSlider(label: String, index: Int, onUpdate: (Int, Float) -> Unit) {
-        var sliderValue by remember { mutableFloatStateOf(135f) }
+    fun JointControlSlider(config: KinematicJointConfig, currentValue: Float, onUpdate: (Int, Float) -> Unit) {
         Column(modifier = Modifier.padding(vertical = 4.dp)) {
-            Text(text = "$label: ${sliderValue.roundToInt()}°", color = Color.LightGray, fontWeight = FontWeight.Bold)
-            Slider(value = sliderValue, onValueChange = { sliderValue = it; onUpdate(index, it) }, valueRange = 0f..270f)
+            Text(
+                text = "${config.label}: ${currentValue.roundToInt()}°",
+                color = Color.LightGray,
+                fontWeight = FontWeight.Bold
+            )
+            Slider(
+                value = currentValue,
+                onValueChange = { onUpdate(config.id, it) },
+                valueRange = config.minLimit..config.maxLimit
+            )
         }
     }
 
     @Composable
-    fun VirtualJoystick(label: String, onPositionChanged: (xAngle: Float, yAngle: Float) -> Unit) {
-        var thumbOffset by remember { mutableStateOf(Offset.Zero) }
-        val radius = 150f
+    fun CalibrationPanel(webView: WebView?) {
+        var selectedNode by remember { mutableIntStateOf(1) }
+        val calibState = remember { mutableStateMapOf<String, Float>() }
 
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Text(text = label, color = Color.LightGray, modifier = Modifier.padding(bottom = 16.dp))
-            Box(
-                contentAlignment = Alignment.Center,
-                modifier = Modifier
-                    .size(160.dp)
-                    .background(Color(0xFF333333), CircleShape)
-                    .pointerInput(Unit) {
-                        detectDragGestures(
-                            onDragEnd = {
-                                thumbOffset = Offset.Zero
-                                onPositionChanged(135f, 135f)
-                            }
-                        ) { change, dragAmount ->
-                            change.consume()
-                            val newPosition = thumbOffset + dragAmount
-                            val distance = hypot(newPosition.x, newPosition.y)
+        fun updateJS(type: String, axis: String, value: Float) {
+            calibState["${type}_${selectedNode}_${axis}"] = value
+            webView?.evaluateJavascript("javascript:updateJointConfig($selectedNode, '$type', '$axis', $value);", null)
+        }
 
-                            thumbOffset = if (distance <= radius) {
-                                newPosition
-                            } else {
-                                val ratio = radius / distance
-                                Offset(newPosition.x * ratio, newPosition.y * ratio)
-                            }
-
-                            val mapX = ((thumbOffset.x + radius) / (2 * radius)) * 270f
-                            val mapY = ((radius - thumbOffset.y) / (2 * radius)) * 270f
-
-                            onPositionChanged(mapX, mapY)
-                        }
-                    }
-            ) {
-                Box(
-                    modifier = Modifier
-                        .offset { IntOffset(thumbOffset.x.roundToInt(), thumbOffset.y.roundToInt()) }
-                        .size(50.dp)
-                        .background(Color(0xFF00E5FF), CircleShape)
-                )
+        Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
+            Text("Seleziona Nodo Cinematico (Indice JS):", color = Color.White)
+            Row(modifier = Modifier.horizontalScroll(rememberScrollState())) {
+                // Ridotto iteratore nodi ai 4 rimanenti (0..3)
+                (0..3).forEach { nodeIdx ->
+                    Button(
+                        onClick = { selectedNode = nodeIdx },
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = if (selectedNode == nodeIdx) Color.Cyan else Color.DarkGray
+                        ),
+                        modifier = Modifier.padding(4.dp)
+                    ) { Text("N$nodeIdx", color = if (selectedNode == nodeIdx) Color.Black else Color.White) }
+                }
             }
+
+            Divider(color = Color.Gray, modifier = Modifier.padding(vertical = 8.dp))
+
+            Text("Joint Position (Origine Rotazione)", color = Color.Yellow, fontWeight = FontWeight.Bold)
+            CalibSlider("X", calibState["jointPos_${selectedNode}_x"] ?: 0f) { updateJS("jointPos", "x", it) }
+            CalibSlider("Y", calibState["jointPos_${selectedNode}_y"] ?: 0f) { updateJS("jointPos", "y", it) }
+            CalibSlider("Z", calibState["jointPos_${selectedNode}_z"] ?: 0f) { updateJS("jointPos", "z", it) }
+
+            Divider(color = Color.Gray, modifier = Modifier.padding(vertical = 8.dp))
+
+            Text("Mesh Offset (Traslazione Geometria STL)", color = Color.Green, fontWeight = FontWeight.Bold)
+            CalibSlider("X", calibState["meshOffset_${selectedNode}_x"] ?: 0f) { updateJS("meshOffset", "x", it) }
+            CalibSlider("Y", calibState["meshOffset_${selectedNode}_y"] ?: 0f) { updateJS("meshOffset", "y", it) }
+            CalibSlider("Z", calibState["meshOffset_${selectedNode}_z"] ?: 0f) { updateJS("meshOffset", "z", it) }
+
+            Divider(color = Color.Gray, modifier = Modifier.padding(vertical = 8.dp))
+
+            Text("Mesh Rotation (Orientamento Assoluto STL)", color = Color.Magenta, fontWeight = FontWeight.Bold)
+            CalibSlider("X", calibState["meshRotation_${selectedNode}_x"] ?: 0f, -360f..360f) { updateJS("meshRotation", "x", it) }
+            CalibSlider("Y", calibState["meshRotation_${selectedNode}_y"] ?: 0f, -360f..360f) { updateJS("meshRotation", "y", it) }
+            CalibSlider("Z", calibState["meshRotation_${selectedNode}_z"] ?: 0f, -360f..360f) { updateJS("meshRotation", "z", it) }
+        }
+    }
+
+    @Composable
+    fun CalibSlider(label: String, value: Float, range: ClosedFloatingPointRange<Float> = -250f..250f, onValueChange: (Float) -> Unit) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(text = "$label: ${value.roundToInt()}", color = Color.White, modifier = Modifier.width(60.dp))
+            Slider(value = value, onValueChange = onValueChange, valueRange = range, modifier = Modifier.weight(1f))
         }
     }
 
@@ -272,7 +335,7 @@ class MainActivity : ComponentActivity() {
                     Spacer(modifier = Modifier.height(8.dp))
                     Text("Puntatori File STL (in assets/)", fontWeight = FontWeight.Bold)
                     stls.forEachIndexed { index, fileName ->
-                        OutlinedTextField(value = fileName, onValueChange = { stls[index] = it }, label = { Text("Giunto $index") })
+                        OutlinedTextField(value = fileName, onValueChange = { stls[index] = it }, label = { Text("Geometria $index") })
                     }
                 }
             },
